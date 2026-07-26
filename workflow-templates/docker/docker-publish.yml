@@ -1,0 +1,367 @@
+# Copy this file to .github/workflows/docker-publish.yml.
+#
+# This version publishes to GHCR on pushes to main, version tags and manual runs.
+# Edit REGISTRY, IMAGE_NAME, DOCKERFILE, BUILD_CONTEXT and the platform matrix if
+# the repository needs different values. For another registry, also edit the
+# login steps and provide the relevant repository secrets.
+#
+# Optional: copy one of the smoke scripts from this repository to
+# .github/scripts/container-smoke.sh in the target repository. The amd64 digest
+# is pulled, registry credentials are removed, and the script runs before the
+# release tags are created.
+#
+# If the target repository does not support GitHub artifact attestations, remove
+# the two actions/attest steps and the related publish-job permissions.
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Publish Docker image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  BUILD_CONTEXT: .
+  DOCKERFILE: Dockerfile
+  TRIVY_VERSION: v0.72.0
+  TRIVY_SEVERITY: CRITICAL,HIGH
+
+jobs:
+  build:
+    name: Build and approve - ${{ matrix.platform }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            slug: amd64
+            smoke: true
+          - platform: linux/arm64
+            slug: arm64
+            smoke: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve the registry image name
+        id: image
+        shell: bash
+        env:
+          SOURCE_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          image="$(printf '%s' "$SOURCE_IMAGE" | tr '[:upper:]' '[:lower:]')"
+          echo "name=$image" >>"$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Generate OCI labels
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: type=sha,format=long
+
+      - name: Build and push candidate by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ env.BUILD_CONTEXT }}
+          file: ${{ env.DOCKERFILE }}
+          platforms: ${{ matrix.platform }}
+          pull: true
+          labels: ${{ steps.metadata.outputs.labels }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=docker-publish-${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=docker-publish-${{ matrix.slug }}
+          provenance: false
+
+      - name: Scan the exact candidate digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: ${{ env.TRIVY_SEVERITY }}
+
+      - name: Pull the exact candidate for the smoke test
+        if: ${{ matrix.smoke && hashFiles('.github/scripts/container-smoke.sh') != '' }}
+        shell: bash
+        env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.name }}
+          CANDIDATE_DIGEST: ${{ steps.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          docker pull --platform "$PLATFORM" "$CANDIDATE_IMAGE@$CANDIDATE_DIGEST"
+          docker tag "$CANDIDATE_IMAGE@$CANDIDATE_DIGEST" local/release-smoke:latest
+
+      - name: Remove registry credentials before the smoke test
+        if: ${{ matrix.smoke && hashFiles('.github/scripts/container-smoke.sh') != '' && always() }}
+        shell: bash
+        env:
+          REGISTRY_HOST: ${{ env.REGISTRY }}
+        run: |
+          docker logout "$REGISTRY_HOST" >/dev/null 2>&1 || true
+
+      - name: Smoke-test the exact candidate digest
+        if: ${{ matrix.smoke && hashFiles('.github/scripts/container-smoke.sh') != '' }}
+        shell: bash
+        env:
+          IMAGE_REF: local/release-smoke:latest
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/container-smoke.sh
+
+      - name: Record the approved digest
+        id: digest
+        shell: bash
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST_DIRECTORY: ${{ runner.temp }}/approved-digests
+        run: |
+          set -euo pipefail
+          digest_hex="${BUILD_DIGEST#sha256:}"
+          if [[ ! "$digest_hex" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Unexpected digest: $BUILD_DIGEST" >&2
+            exit 1
+          fi
+          mkdir -p "$DIGEST_DIRECTORY"
+          touch "$DIGEST_DIRECTORY/$digest_hex"
+
+      - name: Upload the approved digest marker
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: docker-digest-${{ matrix.slug }}
+          path: ${{ runner.temp }}/approved-digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish approved manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      attestations: write
+      artifact-metadata: write
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      image: ${{ steps.manifest.outputs.image }}
+      digest: ${{ steps.manifest.outputs.digest }}
+      reference: ${{ steps.manifest.outputs.reference }}
+      version: ${{ steps.manifest.outputs.version }}
+    steps:
+      - name: Download approved digest markers
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: docker-digest-*
+          path: ${{ runner.temp }}/approved-digests
+          merge-multiple: true
+
+      - name: Resolve the registry image name
+        id: image
+        shell: bash
+        env:
+          SOURCE_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          image="$(printf '%s' "$SOURCE_IMAGE" | tr '[:upper:]' '[:lower:]')"
+          echo "name=$image" >>"$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Generate publication tags
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create the manifest from approved digests
+        id: manifest
+        shell: bash
+        env:
+          DIGEST_DIRECTORY: ${{ runner.temp }}/approved-digests
+          IMAGE: ${{ steps.image.outputs.name }}
+          MANIFEST_METADATA: ${{ runner.temp }}/manifest-metadata.json
+          META_JSON: ${{ steps.metadata.outputs.json }}
+          META_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t tags < <(jq -r '.tags[]' <<<"$META_JSON")
+          mapfile -t digest_files < <(find "$DIGEST_DIRECTORY" -maxdepth 1 -type f -printf '%f\n' | sort)
+
+          if (( ${#tags[@]} == 0 )); then
+            echo "No publication tags were generated." >&2
+            exit 1
+          fi
+          if (( ${#digest_files[@]} == 0 )); then
+            echo "No approved digests were downloaded." >&2
+            exit 1
+          fi
+
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
+
+          sources=()
+          for digest_hex in "${digest_files[@]}"; do
+            if [[ ! "$digest_hex" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Unexpected digest marker: $digest_hex" >&2
+              exit 1
+            fi
+            sources+=("$IMAGE@sha256:$digest_hex")
+          done
+
+          docker buildx imagetools create \
+            --metadata-file "$MANIFEST_METADATA" \
+            "${tag_args[@]}" \
+            "${sources[@]}"
+
+          digest="$(jq -r '."containerimage.descriptor".digest' "$MANIFEST_METADATA")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Unexpected manifest digest: $digest" >&2
+            exit 1
+          fi
+
+          for tag in "${tags[@]}"; do
+            observed=""
+            for attempt in 1 2 3 4 5; do
+              observed="$(docker buildx imagetools inspect "$tag" --format '{{ .Manifest.Digest }}' 2>/dev/null || true)"
+              [[ "$observed" == "$digest" ]] && break
+              sleep 2
+            done
+            if [[ "$observed" != "$digest" ]]; then
+              echo "Tag $tag resolved to $observed instead of $digest" >&2
+              exit 1
+            fi
+          done
+
+          echo "image=$IMAGE" >>"$GITHUB_OUTPUT"
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "reference=$IMAGE@$digest" >>"$GITHUB_OUTPUT"
+          echo "version=$META_VERSION" >>"$GITHUB_OUTPUT"
+
+      - name: Generate a CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ steps.manifest.outputs.reference }}
+          format: cyclonedx
+          output: ${{ runner.temp }}/sbom.cdx.json
+
+      - name: Generate build provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          subject-version: ${{ steps.manifest.outputs.version }}
+          push-to-registry: true
+
+      - name: Generate the SBOM attestation
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          subject-version: ${{ steps.manifest.outputs.version }}
+          sbom-path: ${{ runner.temp }}/sbom.cdx.json
+          push-to-registry: true
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: container-sbom
+          path: ${{ runner.temp }}/sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Create GitHub release
+    if: ${{ github.ref_type == 'tag' }}
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download the SBOM
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: container-sbom
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Create or update the release
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SBOM_PATH: ${{ runner.temp }}/release-assets/sbom.cdx.json
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$SBOM_PATH" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              "$SBOM_PATH" \
+              --verify-tag \
+              --generate-notes \
+              --title "$RELEASE_TAG"
+          fi

@@ -1,0 +1,141 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "dependencyDashboard": true,
+  "semanticCommits": "enabled",
+  "rangeStrategy": "pin",
+  "minimumReleaseAge": "3 days",
+  "enabledManagers": [
+    "github-actions",
+    "custom.regex"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)(workflow-templates|\\.github/workflows)/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "UV_VERSION: \\\"(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\\\""
+      ],
+      "depNameTemplate": "astral-sh/uv",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)(workflow-templates|\\.github/workflows)/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "TRIVY_VERSION: v(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "aquasecurity/trivy",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)(workflow-templates|\\.github/workflows)/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "go-version: (?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "go",
+      "datasourceTemplate": "golang-version"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)(workflow-templates|\\.github/workflows)/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "gitleaks/v8@v(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "gitleaks/gitleaks",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)(workflow-templates|\\.github/workflows)/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "pip-audit==(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "pip-audit",
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)(workflow-templates|\\.github/workflows)/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "bandit==(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "bandit",
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/validate-library\\.yml$/"
+      ],
+      "matchStrings": [
+        "ACTIONLINT_VERSION: \\\"(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\\\""
+      ],
+      "depNameTemplate": "rhysd/actionlint",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Makefile$/",
+        "/^\\.github/workflows/validate-library\\.yml$/"
+      ],
+      "matchStrings": [
+        "PY_YAML_VERSION \\?= (?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)",
+        "PyYAML==(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "depNameTemplate": "PyYAML",
+      "datasourceTemplate": "pypi"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions",
+      "semanticCommitType": "chore",
+      "automerge": false
+    },
+    {
+      "matchDepNames": [
+        "astral-sh/uv",
+        "go",
+        "rhysd/actionlint",
+        "PyYAML"
+      ],
+      "groupName": "workflow toolchains",
+      "semanticCommitType": "chore",
+      "automerge": false
+    },
+    {
+      "matchDepNames": [
+        "aquasecurity/trivy",
+        "bandit",
+        "gitleaks/gitleaks",
+        "pip-audit"
+      ],
+      "groupName": "workflow security tools",
+      "semanticCommitType": "chore",
+      "automerge": false
+    }
+  ]
+}

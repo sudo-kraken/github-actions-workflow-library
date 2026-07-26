@@ -1,0 +1,27 @@
+# Copy this file to .github/workflows/dependency-review.yml.
+# Delete it from a repository that does not use GitHub dependency review.
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Dependency review
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: high

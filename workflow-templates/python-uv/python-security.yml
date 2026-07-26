@@ -1,0 +1,95 @@
+# Copy this file to .github/workflows/python-security.yml.
+#
+# Bandit scans src/ and app/ when they exist. Edit the paths in the final step
+# if the project uses a different source layout.
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Python security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  merge_group:
+  schedule:
+    - cron: "37 3 * * 2"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: python-security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_PYTHON: "3.13"
+  UV_PYTHON_DOWNLOADS: never
+  UV_VERSION: "0.11.32"
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  application-security:
+    name: Dependency audit and Bandit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.UV_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Check the lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+
+      - name: Export locked production dependencies
+        shell: bash
+        env:
+          REQUIREMENTS_FILE: ${{ runner.temp }}/locked-requirements.txt
+        run: |
+          set -euo pipefail
+          uv export --locked --no-dev --no-emit-project \
+            --format requirements-txt \
+            --output-file "$REQUIREMENTS_FILE"
+
+      - name: Audit production dependencies
+        shell: bash
+        env:
+          REQUIREMENTS_FILE: ${{ runner.temp }}/locked-requirements.txt
+        run: |
+          set -euo pipefail
+          uvx --from pip-audit==2.10.1 pip-audit \
+            --strict \
+            --require-hashes \
+            --requirement "$REQUIREMENTS_FILE"
+
+      - name: Run Bandit
+        shell: bash
+        run: |
+          set -euo pipefail
+          paths=()
+          for candidate in src app; do
+            [[ -e "$candidate" ]] && paths+=("$candidate")
+          done
+          if (( ${#paths[@]} == 0 )); then
+            echo "No src/ or app/ directory found; Bandit was skipped."
+            exit 0
+          fi
+          uvx --from bandit==1.9.4 bandit \
+            --quiet \
+            --recursive \
+            --severity-level medium \
+            "${paths[@]}"

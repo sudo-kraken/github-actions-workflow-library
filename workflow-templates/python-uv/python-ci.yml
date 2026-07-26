@@ -1,0 +1,186 @@
+# Copy this file to .github/workflows/python-ci.yml.
+#
+# Edit these defaults for the repository:
+#   - PRIMARY_PYTHON below
+#   - the Python versions in jobs.test.strategy.matrix
+#   - the pytest command and coverage threshold
+#   - the uv sync arguments if the project does not use all extras
+#
+# Optional: add .github/scripts/validate.sh for repository-specific checks.
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Python CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: python-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PRIMARY_PYTHON: "3.13"
+  UV_VERSION: "0.11.32"
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  quality:
+    name: Lock, compile and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Check the lockfile
+        shell: bash
+        env:
+          UV_PYTHON: ${{ env.PRIMARY_PYTHON }}
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          set -euo pipefail
+          uv lock --check
+
+      - name: Install the locked development environment
+        shell: bash
+        env:
+          UV_PYTHON: ${{ env.PRIMARY_PYTHON }}
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          set -euo pipefail
+          uv sync --locked --all-extras --dev
+
+      - name: Compile Python sources
+        shell: bash
+        env:
+          UV_PYTHON: ${{ env.PRIMARY_PYTHON }}
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          set -euo pipefail
+          paths=()
+          for candidate in src app tests scripts; do
+            [[ -e "$candidate" ]] && paths+=("$candidate")
+          done
+          if (( ${#paths[@]} > 0 )); then
+            uv run --locked python -m compileall -q "${paths[@]}"
+          fi
+
+      - name: Check formatting
+        shell: bash
+        env:
+          UV_PYTHON: ${{ env.PRIMARY_PYTHON }}
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          set -euo pipefail
+          uv run --locked ruff format --check .
+
+      - name: Run Ruff
+        shell: bash
+        env:
+          UV_PYTHON: ${{ env.PRIMARY_PYTHON }}
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          set -euo pipefail
+          uv run --locked ruff check --output-format=github .
+
+      - name: Run repository validation script
+        if: ${{ hashFiles('.github/scripts/validate.sh') != '' }}
+        shell: bash
+        env:
+          UV_PYTHON: ${{ env.PRIMARY_PYTHON }}
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          set -euo pipefail
+          uv run --locked bash .github/scripts/validate.sh
+
+  test:
+    name: Test - Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the locked test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked --all-extras --dev
+
+      - name: Verify the selected Python runtime
+        shell: bash
+        env:
+          REQUESTED_PYTHON: ${{ matrix.python-version }}
+        run: |
+          set -euo pipefail
+          uv run --locked python - <<'PY'
+          import os
+          import sys
+
+          expected = tuple(int(part) for part in os.environ["REQUESTED_PYTHON"].split("."))
+          actual = sys.version_info[: len(expected)]
+          print(sys.executable)
+          print(sys.version)
+          if actual != expected:
+              raise SystemExit(f"expected Python {expected}, got {actual}")
+          PY
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --locked python -m pytest \
+            --cov \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=75
+
+      - name: Upload coverage report
+        if: ${{ always() && hashFiles('coverage.xml') != '' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: coverage-python-${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
