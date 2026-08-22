@@ -35,7 +35,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   BUILD_CONTEXT: .
   DOCKERFILE: Dockerfile
-  TRIVY_VERSION: v0.72.0
+  TRIVY_VERSION: v0.74.0
   TRIVY_SEVERITY: CRITICAL,HIGH
 
 jobs:
