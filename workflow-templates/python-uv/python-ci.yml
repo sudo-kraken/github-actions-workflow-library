@@ -27,7 +27,7 @@ concurrency:
 
 env:
   PRIMARY_PYTHON: "3.13"
-  UV_VERSION: "0.11.32"
+  UV_VERSION: "0.12.15"
   UV_NO_PROGRESS: "1"
 
 jobs:
