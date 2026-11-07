@@ -1,6 +1,6 @@
 PYTHON ?= python3
 UV ?= uv
-PY_YAML_VERSION ?= 6.0.2
+PY_YAML_VERSION ?= 6.0.3
 
 .PHONY: check
 
